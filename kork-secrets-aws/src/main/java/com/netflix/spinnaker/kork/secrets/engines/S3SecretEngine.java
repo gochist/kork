@@ -17,10 +17,16 @@
 package com.netflix.spinnaker.kork.secrets.engines;
 
 import com.amazonaws.AmazonClientException;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicSessionCredentials;
+import com.amazonaws.auth.profile.ProfileCredentialsProvider;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 import com.amazonaws.services.s3.model.S3Object;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenService;
+import com.amazonaws.services.securitytoken.AWSSecurityTokenServiceClientBuilder;
+import com.amazonaws.services.securitytoken.model.*;
 import com.netflix.spinnaker.kork.secrets.EncryptedSecret;
 import com.netflix.spinnaker.kork.secrets.SecretException;
 import java.io.IOException;
@@ -30,6 +36,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class S3SecretEngine extends AbstractStorageSecretEngine {
   private static String IDENTIFIER = "s3";
+  private static final String STORAGE_ROLE_ARN = "R";
 
   public String identifier() {
     return S3SecretEngine.IDENTIFIER;
@@ -40,8 +47,42 @@ public class S3SecretEngine extends AbstractStorageSecretEngine {
     String region = encryptedSecret.getParams().get(STORAGE_REGION);
     String bucket = encryptedSecret.getParams().get(STORAGE_BUCKET);
     String objName = encryptedSecret.getParams().get(STORAGE_FILE_URI);
+    String roleARN = encryptedSecret.getParams().get(STORAGE_ROLE_ARN);
+    BasicSessionCredentials basicSessionCredentials = null;
+
+    if (null != roleARN) {
+      AWSSecurityTokenService stsClient =
+          AWSSecurityTokenServiceClientBuilder.standard()
+              .withCredentials(new ProfileCredentialsProvider())
+              .withRegion(region)
+              .build();
+
+      AssumeRoleRequest roleRequest =
+          new AssumeRoleRequest().withRoleArn(roleARN).withRoleSessionName("roleSessionName");
+
+      AssumeRoleResult response = stsClient.assumeRole(roleRequest);
+
+      GetSessionTokenRequest getSessionTokenRequest =
+          new GetSessionTokenRequest().withDurationSeconds(7200);
+      GetSessionTokenResult sessionTokenResult = stsClient.getSessionToken(getSessionTokenRequest);
+      Credentials sessionCredentials =
+          sessionTokenResult
+              .getCredentials()
+              .withSessionToken(sessionTokenResult.getCredentials().getSessionToken())
+              .withExpiration(sessionTokenResult.getCredentials().getExpiration());
+
+      basicSessionCredentials =
+          new BasicSessionCredentials(
+              sessionCredentials.getAccessKeyId(),
+              sessionCredentials.getSecretAccessKey(),
+              sessionCredentials.getSessionToken());
+    }
 
     AmazonS3ClientBuilder s3ClientBuilder = AmazonS3ClientBuilder.standard().withRegion(region);
+
+    if (null != basicSessionCredentials) {
+      s3ClientBuilder.withCredentials(new AWSStaticCredentialsProvider(basicSessionCredentials));
+    }
 
     AmazonS3 s3Client = s3ClientBuilder.build();
 
@@ -59,9 +100,9 @@ public class S3SecretEngine extends AbstractStorageSecretEngine {
       if (403 == ex.getStatusCode()) {
         sb.append(
             String.format(
-                "Unauthorized access. Check connectivity and permissions to the bucket. -- Bucket: %s, Object: %s, Region: %s.\n"
+                "Unauthorized access. Check connectivity and permissions to the bucket. -- Bucket: %s, Object: %s, Region: %s, RoleARN: %s.\n"
                     + "Error: %s ",
-                bucket, objName, region, ex.toString()));
+                bucket, objName, region, roleARN, ex.toString()));
       } else if (404 == ex.getStatusCode()) {
         sb.append(
             String.format(

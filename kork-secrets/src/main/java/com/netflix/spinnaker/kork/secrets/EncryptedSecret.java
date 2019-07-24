@@ -48,7 +48,7 @@ public class EncryptedSecret {
 
   @Getter private Map<String, String> params = new HashMap<>();
 
-  EncryptedSecret(String secretConfig) {
+  public EncryptedSecret(String secretConfig) {
     this.update(secretConfig);
   }
 
